@@ -1,0 +1,303 @@
+---
+- name: Install Kubernetes Cluster
+  hosts: all
+  remote_user: user01
+  become: yes
+  gather_facts: no
+
+  vars:
+   ansible_become_password: "{{ user01_su_pass }}"
+
+  vars_files:
+   - kubvault.yml
+
+  tasks:
+  - name: Ensure --limit is specified
+    fail:
+     msg: "❌ No --limit specified! Please use --limit <target>"
+    when: ansible_limit is not defined or ansible_limit == "all"
+    tags: 
+     - node
+     - master
+    
+  - name: Install Kernel Headers (on each node)
+    ansible.builtin.shell:
+     cmd: sudo dnf install -y kernel-devel-$(uname -r)
+    tags: 
+     - node
+     - master
+
+  - name: Add Kernel Modules (on each node)
+    ansible.builtin.shell:
+     cmd: |
+      sudo modprobe br_netfilter
+      sudo modprobe ip_vs
+      sudo modprobe ip_vs_rr
+      sudo modprobe ip_vs_wrr
+      sudo modprobe ip_vs_sh
+      sudo modprobe overlay
+    tags: 
+     - node
+     - master
+
+  - name: Create a configuration file (as the root user on each node) to ensure these modules load at system boot
+    ansible.builtin.shell:
+     cmd: |
+      sudo cat > /etc/modules-load.d/kubernetes.conf << EOF
+      br_netfilter
+      ip_vs
+      ip_vs_rr
+      ip_vs_wrr
+      ip_vs_sh
+      overlay
+      EOF
+    tags: 
+     - node
+     - master
+
+  - name: Configure Sysctl (on each node)
+    ansible.builtin.shell:
+     cmd: |
+      sudo cat > /etc/sysctl.d/kubernetes.conf << EOF
+      net.ipv4.ip_forward = 1
+      net.bridge.bridge-nf-call-ip6tables = 1
+      net.bridge.bridge-nf-call-iptables = 1
+      EOF
+      sudo sysctl --system
+    tags: 
+     - node
+     - master
+
+  - name: Disabling Swap
+    ansible.builtin.shell:
+     cmd: |
+      sudo swapoff -a
+      sudo sed -i '/ swap / s/^/#/' /etc/fstab
+    tags: 
+     - node
+     - master
+
+  - name: Install Containerd (on each node)
+    block:
+      - name: Add the Docker CE Repository
+        ansible.builtin.shell:
+         cmd: sudo dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+
+      - name: Update Package Cache
+        ansible.builtin.shell:
+         cmd: sudo dnf makecache
+
+      - name: Install the containerd.io package
+        ansible.builtin.shell:
+         cmd: sudo dnf -y install containerd.io
+      
+      - name: Build out the containerd configuration file
+        ansible.builtin.shell:
+         cmd: sudo sh -c "containerd config default > /etc/containerd/config.toml" ; cat /etc/containerd/config.toml
+
+      - name: Set the SystemdCgroup variable to true (SystemdCgroup = true)
+        ansible.builtin.shell:
+         cmd: sudo sed -i 's/^\([ \t]*SystemdCgroup *= *\).*/\1true/' /etc/containerd/config.toml
+
+      - name: Enable containerd.services and reboot
+        ansible.builtin.shell:
+         cmd: |
+          sudo systemctl enable --now containerd.service
+          sudo systemctl reboot
+        async: 1
+        poll: 0
+      
+      - name: Wait for the server to become reachable
+        wait_for_connection:
+          delay: 10
+          timeout: 300
+          sleep: 10
+
+      - name: Continue after server has 1 min uptime
+        ansible.builtin.shell:
+            cmd: awk '{print $1}' /proc/uptime
+        register: uptime_result
+        changed_when: false  
+        until: (uptime_result.stdout | float) > 60  # Check if uptime is greater than 120 seconds
+        retries: 6  # Number of retries
+        delay: 30  # Wait for 30 sec before retrying
+        failed_when: false  # Prevent task failure if condition is not met
+    tags: 
+     - node
+     - master
+
+  - name: Configure firewall 
+    ansible.builtin.shell:
+     cmd: |  
+      sudo firewall-cmd --zone=public --permanent --add-port=6443/tcp
+      sudo firewall-cmd --zone=public --permanent --add-port=2379-2380/tcp
+      sudo firewall-cmd --zone=public --permanent --add-port=10250/tcp
+      sudo firewall-cmd --zone=public --permanent --add-port=10251/tcp
+      sudo firewall-cmd --zone=public --permanent --add-port=10252/tcp
+      sudo firewall-cmd --zone=public --permanent --add-port=10255/tcp
+      sudo firewall-cmd --zone=public --permanent --add-port=5473/tcp
+      sudo firewall-cmd --zone=public --permanent --add-port=8443/tcp
+      sudo firewall-cmd --reload
+    tags: 
+     - node
+     - master
+
+  - name: Configure Kubernetes repo for v1.32 
+    ansible.builtin.shell:
+     cmd: |
+      sudo cat <<EOF | sudo tee /etc/yum.repos.d/kubernetes.repo
+      [kubernetes]
+      name=Kubernetes
+      baseurl=https://pkgs.k8s.io/core:/stable:/v1.32/rpm/
+      enabled=1
+      gpgcheck=1
+      gpgkey=https://pkgs.k8s.io/core:/stable:/v1.32/rpm/repodata/repomd.xml.key
+      exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
+      EOF
+    tags: 
+     - node
+     - master
+
+  - name: Install the Kubernetes components (kubelet, kubeadm, and kubectl)
+    ansible.builtin.shell:
+     cmd: |
+      sudo dnf makecache 
+      sudo dnf install -y kubelet kubeadm kubectl --disableexcludes=kubernetes
+    tags: 
+     - node
+     - master
+
+  - name: Start and Enable kubelet Service
+    ansible.builtin.shell:
+     cmd: sudo systemctl enable --now kubelet.service
+    ignore_errors: true
+    tags: 
+     - node
+     - master
+
+  - name: Initializing Kubernetes Control Plane ( master node )
+    block:
+      - name: Images pull
+        ansible.builtin.shell:
+         cmd: sudo kubeadm config images pull
+
+      - name: Kubeadm init
+        ansible.builtin.shell:
+         cmd: sudo kubeadm init --pod-network-cidr=10.244.0.0/16
+    tags: 
+     - master
+  
+  - name: Set Up kubeconfig File ( master node )
+    ansible.builtin.shell:
+      cmd: |
+       mkdir -p $HOME/.kube
+       sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+       sudo chown $(id -u):$(id -g) $HOME/.kube/config
+    tags: 
+     - master
+
+  - name: Deploy Pod Network ( master node )
+    ansible.builtin.shell:
+      cmd: |
+       sudo kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/v3.29.3/manifests/tigera-operator.yaml
+       sudo curl -O https://raw.githubusercontent.com/projectcalico/calico/v3.29.3/manifests/custom-resources.yaml
+       sudo sed -i 's/cidr: 192\.168\.0\.0\/16/cidr: 10.244.0.0\/16/g' custom-resources.yaml
+       sudo kubectl create -f custom-resources.yaml
+    tags: 
+     - master
+
+  - name: Generate token for joining worker nodes ( master node )
+    ansible.builtin.shell:
+      cmd: sudo kubeadm token create --print-join-command
+    register: token
+    tags: 
+     - master
+
+  - name: Ensure /tmp/kubejoin directory exists
+    ansible.builtin.file:
+      path: /ansible/kubernetes/kubejoin
+      state: directory
+      owner: root
+      group: root
+      mode: '0775'
+    delegate_to: localhost
+    tags: 
+     - master
+
+  - name: Save the token to a file with specific permissions
+    ansible.builtin.copy:
+      content: "{{ token.stdout }}"
+      dest: /ansible/kubernetes/kubejoin/token
+      owner: root
+      group: root
+      mode: '0664'
+    delegate_to: localhost
+    tags: 
+     - master
+
+  - name: Install git on master node
+    ansible.builtin.shell:
+      cmd: sudo dnf install -y git
+    tags: 
+     - master
+
+  - name: Install tmux
+    ansible.builtin.shell:
+      cmd: sudo dnf install -y tmux
+    tags: 
+     - master
+
+  - name: Install Helm on master node
+    ansible.builtin.shell:
+     cmd: | 
+      curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+      chmod 700 get_helm.sh
+      ./get_helm.sh
+      helm repo add kubernetes-dashboard https://kubernetes.github.io/dashboard/
+      sleep 2
+      helm repo update
+    become_user: root
+    become_method: su
+    become: yes
+    tags: 
+     - master
+
+  - name: Install kubernetes-dashboard
+    ansible.builtin.shell:
+     cmd: | 
+      helm upgrade --install kubernetes-dashboard kubernetes-dashboard/kubernetes-dashboard --create-namespace --namespace kubernetes-dashboard
+      #Restart coredns
+      sudo kubectl rollout restart deployment -n kube-system coredns
+      # To access Dashboard run the below in a tmux session
+      # sudo kubectl -n kubernetes-dashboard port-forward svc/kubernetes-dashboard-kong-proxy 8443:443  --address='192.168.235.118'
+      # Dashboard will be available at: https://<server_ip>:8443
+    become_user: root
+    become_method: su
+    become: yes
+    tags: 
+     - master
+
+  - name: Create serviceaccount user
+    ansible.builtin.shell:
+     cmd: |
+      sudo kubectl create serviceaccount marcel -n kubernetes-dashboard
+      sudo kubectl create clusterrolebinding marcel-admin \
+      --clusterrole=cluster-admin \
+      --serviceaccount=kubernetes-dashboard:marcel
+      # get the token every time you need to connect to the kubernetes-dashboard
+      # kubectl -n kubernetes-dashboard create token marcel
+    tags: 
+     - master
+
+  - name: Run Join Command on Worker Nodes
+    ansible.builtin.shell:
+      cmd: "sudo {{ lookup('file', '/ansible/kubernetes/kubejoin/token') }}"
+    tags: 
+     - node
+
+  - name : Check the nodes
+    debug:
+      msg: "On the master verify worker node join with : kubectl get nodes"
+    delegate_to: localhost
+    tags: 
+     - node
