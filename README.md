@@ -18,7 +18,7 @@ Welcome to my personal collection of Ansible playbooks and Bash scripts built fo
 
 ## 🛠 Requirements
 
-- Ansible (version X.X or newer)
+- Ansible (version 2.14 or newer)
 - Bash-compatible shell (Linux/macOS)
 - Lab systems (e.g. XenServer, Windows, or Linux VMs)
 - Optional: WinRM setup for managing Windows hosts with Ansible
