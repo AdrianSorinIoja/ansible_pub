@@ -31,7 +31,7 @@ Welcome to my personal collection of Ansible playbooks and Bash scripts built fo
 
 ## 🧾 License
 
-This repo is open-source and free to use under the [MIT License](LICENSE).
+This repo is open-source and free to use.
 
 ## 🙋‍♂️ Feedback / Contributions
 
