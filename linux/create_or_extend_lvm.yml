@@ -1,0 +1,200 @@
+---
+- name: Create\Extend LVM (condition = one disk one partition)
+  hosts: all
+  remote_user: root
+  become: no
+  gather_facts: no
+
+  vars_files:
+   - linvault.yml
+
+  tasks:
+    - name: Ensure --limit is specified
+      fail:
+       msg: "❌ No --limit specified! Please use --limit <target>"
+      when: ansible_limit is not defined or ansible_limit == "all"
+    
+    - name: Display a message before starting
+      debug:
+        msg: 
+         - " Welcome to the LVM creation playbook"
+         - " This will create a LVM from one empty disk ( will not work if you allready have an partion on the disk)."
+         - " Volume group will be: prodvg"
+         - " Logical volume will be: prodlv"
+    
+    - name: Promt user to confirm after reading the message above 
+      pause:
+        prompt: "\e[33mDo you want to continue?\e[0m (yes/no)"
+      register: user_confirmation
+      changed_when: false
+      run_once: true
+
+    - name: Stop playbook if user says no
+      fail:
+          msg: "Playbook execution aborted by user."
+      when: user_confirmation.user_input != 'yes'
+      changed_when: false
+      run_once: true
+
+    - name: Get lsblk from remote server
+      ansible.builtin.shell:
+       cmd: lsblk -f
+      register: lsblk
+    
+    - name: Print lsblk 
+      debug:
+        msg: "{{ lsblk.stdout_lines }}"
+    
+    - name: Promt user for the drive 
+      pause:
+        prompt: "\e[33mPlease type the name of the drive for LVM creation?\e[0m"
+      register: drive
+      changed_when: false
+      run_once: true
+
+    - name: Create LVM 
+      ansible.builtin.shell:
+       cmd: |
+        #Create the label
+        parted --script /dev/'{{ drive.user_input }}' mklabel gpt mkpart primary 0% 100% set 1 lvm on
+        sleep 1
+
+        #Make sure the partitions have been saved
+        udevadm settle
+        sleep 1
+
+        #Get partition name
+        partition=$(lsblk -nr -o NAME /dev/{{ drive.user_input }} | grep -E '^{{ drive.user_input }}p[0-9]+' | head -n1)
+
+        #Create physical volume
+        pvcreate /dev/$partition
+        sleep 1
+
+        #Create volume group
+        vgcreate prodvg /dev/$partition
+        sleep 1
+
+        #Create logical volume using all available space ( use -L with fixed size like 10GiB and -l with a percentage like 100%FREE)
+        lvcreate -l 100%FREE -n prodlv prodvg --yes
+        sleep 1
+
+        #Create the file system in this case its xfs
+        mkfs.xfs /dev/prodvg/prodlv
+        sleep 1
+
+        #Create a label for the LVM to use later in fstab
+        xfs_admin -L prodlvm /dev/prodvg/prodlv
+
+    - name: Create new direcotry for LVM mount user action
+      pause:
+        prompt: "\e[33mPlease type the name of the directory (absolute path required):\nExample: /prod or /prod/lvm\nThis will create the directory using: mkdir -p\e[0m"
+      register: mount_dir
+      changed_when: false
+      run_once: true
+
+    - name: Create new direcotry for LVM mount based on user action
+      ansible.builtin.shell:
+       cmd: mkdir -p {{ mount_dir.user_input }}
+      
+    - name: Mounting
+      ansible.builtin.shell:
+       cmd: mount /dev/prodvg/prodlv {{ mount_dir.user_input }}
+
+    - name: Add line to fstab
+      ansible.builtin.shell:
+       cmd: |
+        echo 'LABEL=prodlvm                             {{ mount_dir.user_input }}               xfs     defaults        0 0' >> /etc/fstab
+        systemctl daemon-reload
+    
+    - name: Extend the LVM block
+      block:
+        - name: Add aditional drive to the prodlv ?
+          pause:
+            prompt: "\e[33mPlease type yes or no\e[0m"
+          register: user_confirmation
+          changed_when: false
+          run_once: true
+
+        - name: Stop playbook if user says no
+          meta: end_play
+          when: user_confirmation.user_input != 'yes'
+          run_once: true
+
+        - name: Get lsblk from remote server
+          ansible.builtin.shell:
+           cmd: lsblk -f
+          register: lsblk
+        
+        - name: Print lsblk 
+          debug:
+            msg: "{{ lsblk.stdout_lines }}"
+        
+        - name: Prompt user for the drive 
+          pause:
+            prompt: "\e[33mPlease type the name of the drive for LVM creation?\e[0m"
+          register: drive
+          changed_when: false
+          run_once: true
+
+        - name: Extend LVM 
+          ansible.builtin.shell:
+           cmd: |
+            #Create the label
+            parted --script /dev/{{ drive.user_input }} mklabel gpt mkpart primary 0% 100% set 1 lvm on
+            sleep 1
+
+            #Make sure the partitions have been saved
+            udevadm settle
+            sleep 1
+
+            #Get partition name
+            partition=$(lsblk -nr -o NAME /dev/{{ drive.user_input }} | grep -E '^{{ drive.user_input }}p[0-9]+' | head -n1)
+
+            #Create physical volume
+            pvcreate /dev/$partition
+            sleep 1
+
+            #Extend volume group
+            vgextend prodvg /dev/$partition
+            sleep 1
+
+            #Extend logical volume using all available space ( use -L with fixed size like 10GiB and -l with a percentage like 100%FREE)
+            lvextend -l +100%FREE /dev/prodvg/prodlv
+            sleep 1
+
+            #Resize the file system in this case its xfs
+            xfs_growfs /prod/lvm
+            sleep 1
+      tags: extend
+
+    - name: All done print lsblk -f
+      ansible.builtin.shell:
+       cmd: lsblk -f
+      register: lsblk_final
+    
+    - name: Print lsblk final 
+      debug:
+        msg: "{{ lsblk_final.stdout_lines }}"
+
+    - name: All done print fstad
+      ansible.builtin.shell:
+       cmd: cat /etc/fstab
+      register: fstab
+    
+    - name: Print lsblk 
+      debug:
+        msg: "{{ fstab.stdout_lines }}"
+
+    # - name: Clean all to retry
+    #   shell: 
+    #    cmd: |
+    #     umount /prod/lvm
+    #     wipefs -a /dev/prodvg/prodlv
+    #     lvremove -y /dev/prodvg/prodlv
+    #     vgremove -y prodvg
+    #     pvremove /dev/nvme0n2p1
+    #     wipefs -a /dev/nvme0n2p1
+    #     parted /dev/nvme0n2 --script rm 1
+    #     wipefs -a /dev/nvme0n2
+
+    
