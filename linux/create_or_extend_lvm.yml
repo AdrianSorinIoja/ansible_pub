@@ -181,7 +181,7 @@
        cmd: cat /etc/fstab
       register: fstab
     
-    - name: Print lsblk 
+    - name: Print fstab 
       debug:
         msg: "{{ fstab.stdout_lines }}"
 
