@@ -1,0 +1,73 @@
+- name: Get certificate information from Windows hosts
+  hosts: win
+  gather_facts: no
+
+  tasks:
+  - name: Ensure a tag is specified
+    fail:
+      msg: "❌ No tag specified! Please run with --tags <tag_name>"
+    when: tags is not defined
+
+  - name: Get certificate info from LocalMachine\My store
+    ansible.windows.win_certificate_info:
+      store_location: LocalMachine
+      store_name: My
+    register: certs
+    changed_when: false
+    tags: 
+    - personal
+
+  - name: Get certs from Trusted Root store
+    ansible.windows.win_certificate_info:
+      store_location: LocalMachine
+      store_name: Root
+    register: certs
+    tags: 
+    - root
+
+  - name: Get certificates from Intermediate Certification Authorities store
+    ansible.windows.win_certificate_info:
+      store_location: LocalMachine
+      store_name: CA
+    register: certs
+    tags:
+    - intermediate
+
+  - name: Show certificates with expiration dates
+    debug:
+      msg: >
+        {% for cert in certs.certificates | default([]) %}
+          Subject: {{ cert.subject | default('N/A') }}
+          Expiry: {{ cert.valid_to_iso8601 | default('N/A') }}
+        {% endfor %}
+    tags: 
+    - personal
+    - root
+    - intermediate
+  
+
+  - name: Ensure CSV file exists with header
+    ansible.builtin.lineinfile:
+      path: "{{ playbook_dir }}/cert_info.csv"
+      line: "Hostname,Subject,Expiry"
+      create: yes
+      insertbefore: BOF
+    delegate_to: localhost
+    run_once: true
+    tags: 
+    - personal
+    - root
+    - intermediate
+
+  - name: Append certificate info to CSV
+    ansible.builtin.lineinfile:
+      path: "{{ playbook_dir }}/cert_info.csv"
+      line: "{{ inventory_hostname }},{{ item.subject | default('N/A') }},{{ item.valid_to_iso8601 | default('N/A') }}"
+      insertafter: EOF
+    loop: "{{ certs.certificates | default([]) }}"
+    when: certs.certificates is defined
+    delegate_to: localhost
+    tags: 
+    - personal
+    - root
+    - intermediate
