@@ -1,0 +1,98 @@
+---
+- name: Check --limit
+  hosts: all
+  gather_facts: no
+  pre_tasks:
+    - name: Ensure --limit is specified
+      fail:
+        msg: "❌ No --limit specified! Please use --limit <target>"
+      when: ansible_limit is not defined or ansible_limit == "all"
+
+- name: Export crt and key files from pfx for Citrix Licensing
+  hosts: all
+  gather_facts: no
+  vars_prompt:
+    - name: "cert_dir"
+      prompt: "\e[32mEnter directory where the certificate files are located\e[0m"
+      private: no
+    - name: "cert_name"
+      prompt: "\e[32mEnter the .pfx cert name\e[0m"
+      private: no
+    - name: "import_password"
+      prompt: "\e[32mEnter password for P12/PFX files\e[0m"
+      private: yes
+      confirm: yes
+    
+    
+  tasks:
+    - name: Create .crt file from PFX
+      command: >
+        openssl pkcs12
+        -in {{ cert_dir }}/{{ cert_name }}
+        -out {{ cert_dir }}/server.crt -nokeys
+        -passin pass:{{ import_password }}
+      args:
+        creates: "{{ cert_dir }}/server.crt"
+      delegate_to: localhost
+    
+    - name: Set file permissions for crt
+      file:
+        path: "{{ cert_dir }}/server.crt"
+        mode: '0600'
+      delegate_to: localhost
+
+    - name: Create .key file from PFX
+      command: >
+        openssl pkcs12
+        -in {{ cert_dir }}/{{ cert_name }}
+        -out {{ cert_dir }}/server.key -nocerts -nodes
+        -passin pass:{{ import_password }}
+      args:
+        creates: "{{ cert_dir }}/server.key"
+      delegate_to: localhost
+
+    - name: Set file permissions for crt
+      file:
+        path: "{{ cert_dir }}/server.key"
+        mode: '0600'
+      delegate_to: localhost
+
+    - name: Rename existing server.key files by adding _back
+      ansible.windows.win_command: >
+        powershell.exe -Command
+        Rename-Item -Path '{{ item }}' -NewName ((Split-Path '{{ item }}' -Leaf) + '_back')
+      loop:
+        - "C:\\Program Files (x86)\\Citrix\\Licensing\\LS\\conf\\server.key"
+        - "C:\\Program Files (x86)\\Citrix\\Licensing\\WebServicesForLicensing\\Apache\\conf\\server.key"
+
+    - name: Rename existing server.crt files by adding _back
+      ansible.windows.win_command: >
+        powershell.exe -Command
+        Rename-Item -Path '{{ item }}' -NewName ((Split-Path '{{ item }}' -Leaf) + '_back')
+      loop:
+        - "C:\\Program Files (x86)\\Citrix\\Licensing\\LS\\conf\\server.crt"
+        - "C:\\Program Files (x86)\\Citrix\\Licensing\\WebServicesForLicensing\\Apache\\conf\\server.crt"
+
+    - name: Copy key to Windows host in multiple locations
+      ansible.windows.win_copy:
+        src: "{{ cert_dir }}/server.key"
+        dest: "{{ item }}"
+      loop:
+        - "C:\\Program Files (x86)\\Citrix\\Licensing\\LS\\conf\\server.key"
+        - "C:\\Program Files (x86)\\Citrix\\Licensing\\WebServicesForLicensing\\Apache\\conf\\server.key"
+
+    - name: Copy crt to Windows host in multiple locations
+      ansible.windows.win_copy:
+        src: "{{ cert_dir }}/server.crt"
+        dest: "{{ item }}"
+      loop:
+        - "C:\\Program Files (x86)\\Citrix\\Licensing\\LS\\conf\\server.crt"
+        - "C:\\Program Files (x86)\\Citrix\\Licensing\\WebServicesForLicensing\\Apache\\conf\\server.crt"
+
+    - name: Restart Citrix Licensing related services
+      ansible.windows.win_service:
+        name: "{{ item }}"
+        state: restarted
+      loop:
+        - "Citrix Web Services for Licensing"
+        - "Citrix Licensing"
