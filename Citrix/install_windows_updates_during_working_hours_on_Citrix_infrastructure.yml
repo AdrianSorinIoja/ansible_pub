@@ -1,0 +1,154 @@
+---
+- name: Install Windows Updates for Citrix Infra
+  hosts: all
+  gather_facts: no
+
+  tasks:
+  - name: Stop Citrix Broker Service and set to Manual 
+    ansible.windows.win_service:
+      name: CitrixBrokerService
+      start_mode: manual
+      state: stopped
+    when: "'ddc' in inventory_hostname"
+
+  - name: Stop Stream Service and set to Manual 
+    ansible.windows.win_service:
+      name: StreamService
+      start_mode: manual
+      state: stopped
+    when: "'pvs' in inventory_hostname"
+
+  - name: Stop all StoreFront services
+    ansible.windows.win_shell: |
+      Stop-Service -Name "{{ item }}" -Force
+    loop:
+      - Citrix Peer Resolution Service
+      - CitrixConfigurationReplication
+      - CitrixCredentialWallet
+      - CitrixDefaultDomainService
+      - CitrixServiceMonitor
+      - CitrixSubscriptionsStore
+      - CitrixTelemetryService 
+    when: "'stf' in inventory_hostname"
+
+  - name: Set StoreFront services to Manual
+    ansible.windows.win_service:
+        name: "{{ item }}"
+        start_mode: manual
+    loop:
+      - Citrix Peer Resolution Service
+      - CitrixConfigurationReplication
+      - CitrixCredentialWallet
+      - CitrixDefaultDomainService
+      - CitrixServiceMonitor
+      - CitrixSubscriptionsStore
+      - CitrixTelemetryService 
+    when: "'stf' in inventory_hostname"
+
+  - name: Install all available updates
+    ansible.windows.win_updates:
+     category_names:
+      - SecurityUpdates
+      - CriticalUpdates
+      - UpdateRollups
+      - Updates
+     reboot: yes
+
+  - name: Wait for the server to become reachable
+    wait_for_connection:
+     delay: 10
+     timeout: 300
+     sleep: 10
+
+  - name: Wait 30 minute for any renaming windows updates to be installed
+    pause:
+      minutes: 30
+
+  - name: Clean up Windows Update files
+    ansible.windows.win_shell: |
+      Dism.exe /Online /Cleanup-Image /StartComponentCleanup
+ 
+  - name: Reboot 
+    ansible.builtin.win_reboot:
+  
+  - name: Wait for the server to become reachable
+    wait_for_connection:
+      delay: 30
+      timeout: 300
+      sleep: 10
+
+  - name: Wait 20 minute for the server to settel down
+    pause:
+      minutes: 20
+
+  - name: Start Citrix Broker Service and set to Automatic
+    ansible.windows.win_service:
+      name: CitrixBrokerService
+      start_mode: auto
+      state: started
+    when: "'ddc' in inventory_hostname"
+
+  - name: Start Citrix Broker Service and set to Automatic
+    ansible.windows.win_service:
+      name: StreamService
+      start_mode: auto
+      state: started
+    when: "'pvs' in inventory_hostname"
+
+  - name: Set service to Automatic
+    ansible.windows.win_service:
+        name: "{{ item }}"
+        start_mode: auto
+        state: started
+    loop:
+      - CitrixServiceMonitor
+    when: "'stf' in inventory_hostname"
+
+  - name: Set service to Automatic Delayed
+    ansible.windows.win_service:
+        name: "{{ item }}"
+        start_mode: delayed
+        state: started
+    loop:
+      - Citrix Peer Resolution Service
+      - CitrixConfigurationReplication
+      - CitrixCredentialWallet
+      - CitrixDefaultDomainService
+      - CitrixSubscriptionsStore
+      - CitrixTelemetryService 
+    when: "'stf' in inventory_hostname"
+
+  # Below are the same tasks to set the Service to delayed for older versions of Ansible  
+  # - name: Enable Delayed Start
+  #   ansible.windows.win_shell: |
+  #       $serviceName = "{{ item }}"
+  #       # Use sc.exe to set delayed auto start directly
+  #       sc.exe config "$serviceName" start= delayed-auto
+  #       if ($LASTEXITCODE -eq 0) {
+  #         Write-Output "Successfully set $serviceName to Automatic (Delayed Start)"
+  #       } else {
+  #         Write-Warning "Failed to configure $serviceName"
+  #       }
+  #   loop:
+  #     - CitrixTelemetryService
+  #     - CitrixSubscriptionsStore
+  #     - Citrix Peer Resolution Service
+  #     - CitrixDefaultDomainService
+  #     - CitrixCredentialWallet
+  #     - CitrixConfigurationReplication
+  #   when: "'stf' in inventory_hostname"
+
+  # - name: Start and set StoreFront services
+  #   ansible.windows.win_service:
+  #     name: "{{ item }}"
+  #     state: started
+  #   loop:
+  #     - Citrix Peer Resolution Service
+  #     - CitrixConfigurationReplication
+  #     - CitrixCredentialWallet
+  #     - CitrixDefaultDomainService
+  #     - CitrixServiceMonitor
+  #     - CitrixSubscriptionsStore
+  #     - CitrixTelemetryService 
+  #   when: "'stf' in inventory_hostname"
+
